@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tibet-drop"
+version = "0.1.0"
+description = "TIBET Drop — identity-bound device-to-device payload transfer with bilateral consent. Reference Python implementation of TIBET TAT (Touch-And-Transfer) wire protocol."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Jasper van de Meent", email = "info@humotica.com" },
+    { name = "Humotica AI Lab", email = "info@humotica.com" },
+]
+keywords = [
+    "tibet", "tibet-drop", "tibet-tat", "airdrop", "ed25519",
+    "byos", "vc", "identity", "agentic", "humotica"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = [
+    "cryptography>=42.0",
+    "cbor2>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.1.0"]
+
+[project.scripts]
+tibet-drop = "tibet_drop.cli:main"
+
+[project.urls]
+Homepage = "https://humotica.com"
+"TIBET Protocol" = "https://pypi.org/project/tibet-zip-cli/"
