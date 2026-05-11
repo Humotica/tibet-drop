@@ -18,7 +18,12 @@ import struct
 import tempfile
 from pathlib import Path
 
-from .bundle import pack_bundle, verify_bundle
+from .bundle import (
+    compare_surfaces,
+    pack_bundle,
+    parse_filename_surface,
+    verify_bundle,
+)
 from .crypto import (
     EphemeralKey,
     IdentityKey,
@@ -162,7 +167,9 @@ def run_demo(verbose: bool = False) -> int:
                 rel = f.relative_to(sender_state)
                 blocks.append((str(rel), f.read_bytes()))
 
-        bundle_path = tmp_path / "alice-airdrop.tza"
+        # Filename mirrors Semantic Surface Manifest fields per spec §6.1
+        bundle_name = "2026-05-09.airdrop-demo.claude.urgent.tza"
+        bundle_path = tmp_path / bundle_name
         manifest = pack_bundle(
             output_path=bundle_path,
             blocks=blocks,
@@ -173,7 +180,13 @@ def run_demo(verbose: bool = False) -> int:
             payload_type="ai_state",
             tpid=tpid,
             transfer_out_token_id=out_token["token_id"],
+            surface_time_fragment="2026-05-09",
+            surface_context="airdrop-demo",
+            surface_profile="claude",
+            surface_priority="urgent",
         )
+        print(f"  ✓ Filename: {bundle_name}")
+        print(f"    surface_*: 2026-05-09 / airdrop-demo / claude / urgent")
 
         bundle_bytes = bundle_path.read_bytes()
         bundle_hash = sha256_hex(bundle_bytes)
@@ -216,14 +229,26 @@ def run_demo(verbose: bool = False) -> int:
             return 1
         print(f"  ✓ SHA-256 matches sender's claim")
 
-        # Bob writes recovered bundle, runs verifier
-        bob_bundle = tmp_path / "bob-received.tza"
+        # Bob writes recovered bundle (preserving the surface-aware filename)
+        # and runs verifier.
+        bob_bundle = tmp_path / bundle_name
         bob_bundle.write_bytes(recovered)
         valid, manifest_check, errs = verify_bundle(bob_bundle)
         if not valid:
             print(f"✗ Bundle verification failed: {errs}")
             return 1
         print(f"  ✓ Bundle manifest_sig + per-block sigs verified")
+
+        # Surface consistency check (filename ↔ manifest, spec §11)
+        fn_surface = parse_filename_surface(bob_bundle.name)
+        mf_surface = {k: manifest_check.get(k) for k in (
+            "surface_time_fragment", "surface_context",
+            "surface_profile", "surface_priority")}
+        status = compare_surfaces(fn_surface, mf_surface)
+        if status != "MATCH":
+            print(f"✗ Surface consistency unexpected: {status}")
+            return 1
+        print(f"  ✓ Surface consistency: MATCH (filename mirrors manifest)")
 
         # ─── Step 8: transfer_in token (Lamport inheritance) ──
         print()
@@ -267,6 +292,38 @@ def run_demo(verbose: bool = False) -> int:
         tomb_token = tombstone.to_dict(alice)
         print(f"  ✓ Tombstone chained ({tomb_token['eraan']['recovery_policy']})")
         print(f"    Successor: {tomb_token['eraan']['successor_device'][:48]}...")
+
+        # ─── Step 10: Rename-attack detection ──────────────────
+        print()
+        print("STEP 10 — Adversary renames bundle (surface ≠ payload)")
+        attacker_name = "2026-05-09.airdrop-demo.claude.normal.tza"
+        renamed = tmp_path / attacker_name
+        bob_bundle.rename(renamed)
+        print(f"  Renamed: {bundle_name}")
+        print(f"        → {attacker_name}")
+        print(f"        (only --priority field swapped: urgent → normal)")
+
+        valid_renamed, manifest_renamed, _ = verify_bundle(renamed)
+        if not valid_renamed:
+            print("✗ Sealed bundle should remain cryptographically valid!")
+            return 1
+        print(f"  ✓ Sealed bundle still cryptographically valid")
+        print(f"    (manifest_sig + per-block sigs unchanged)")
+
+        fn_surface_r = parse_filename_surface(renamed.name)
+        mf_surface_r = {k: manifest_renamed.get(k) for k in (
+            "surface_time_fragment", "surface_context",
+            "surface_profile", "surface_priority")}
+        status_r = compare_surfaces(fn_surface_r, mf_surface_r)
+        if status_r != "MISMATCH":
+            print(f"✗ Expected MISMATCH, got {status_r}")
+            return 1
+        print(f"  ⚠ Surface consistency: MISMATCH detected")
+        print(f"    filename surface_priority = normal")
+        print(f"    manifest surface_priority = urgent")
+        print(f"  → triage fork recommended (spec §11)")
+        print(f"    \"address visible, content sealed,")
+        print(f"     mismatch is triage — not silent accept\"")
 
     # ─── Summary ───────────────────────────────────────────────
     print()

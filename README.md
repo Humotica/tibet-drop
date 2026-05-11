@@ -1,6 +1,7 @@
 # tibet-drop — TIBET Drop / TIBET TAT reference implementation
 
-**Status:** v0.1.0 alpha · 25 tests passing · demo end-to-end clean
+**Status:** v0.2.0 · 25 tests passing · demo end-to-end clean · used as
+TBZ pack/verify substrate by `tibet-continuityd`
 
 `tibet-drop` is the reference Python implementation of **TIBET Drop**
 (product) / **TIBET TAT** (Touch-And-Transfer wire protocol) —
@@ -25,6 +26,18 @@ TIBET Drop in one breath:
 
 The end-to-end demo (`tibet-drop demo`) walks through all nine steps of
 the protocol and produces a clean validation pass for every primitive.
+
+## What's new in v0.2.0
+
+- `compare_surfaces()` and `parse_filename_surface()` exported from
+  `tibet_drop.bundle` (= required by `tibet-continuityd` verify-stage
+  for filename ↔ manifest mirroring)
+- `pack` CLI gains `--surface-priority heartbeat` as 5e priority value
+  (alongside `urgent / normal / background / sealed`); receivers that
+  recognize the identity pin MAY route to a log-only lane
+- TBZ bundle format unchanged — wire-compatible with v0.1.0 receivers
+  for non-heartbeat priorities
+- `tibet-continuityd` v0.6.4+ depends on `tibet-drop>=0.2.0`
 
 ## Use cases
 

@@ -55,11 +55,20 @@ def pack_bundle(
     payload_type: str,
     tpid: bytes,
     transfer_out_token_id: str | None = None,
+    surface_time_fragment: str | None = None,
+    surface_context: str | None = None,
+    surface_profile: str | None = None,
+    surface_priority: str | None = None,
 ) -> dict:
     """Pack a TIBET Drop .tza bundle.
 
     blocks: list of (name, content_bytes) tuples.
     Returns the manifest dict.
+
+    Optional Semantic Surface Manifest fields (surface_*) mirror the
+    external filename routing layer per phase-0-tza-bundle-format §2.2.
+    All four are optional; if any is set, all four SHOULD be set so
+    that filename ↔ manifest consistency checks remain meaningful.
     """
     block_entries = []
     for i, (name, content) in enumerate(blocks, start=1):
@@ -88,12 +97,27 @@ def pack_bundle(
         "transfer_out_token_id": transfer_out_token_id,
     }
 
+    # Semantic Surface Manifest mirroring (optional, v1).
+    # Only emit when explicitly provided.
+    if surface_time_fragment is not None:
+        manifest["surface_time_fragment"] = surface_time_fragment
+    if surface_context is not None:
+        manifest["surface_context"] = surface_context
+    if surface_profile is not None:
+        manifest["surface_profile"] = surface_profile
+    if surface_priority is not None:
+        manifest["surface_priority"] = surface_priority
+
     # Sign manifest per spec §2.2.1 RULE 4
     canonical = _canonical_cbor(manifest)
     manifest["manifest_sig"] = sender_signer.sign(canonical).hex()
 
-    # Serialize: [4B total_blocks][4B mlen][manifest][4B blen][block]...
+    # Serialize: [TBZ magic 3B][1B reserved=0x01]
+    #            [4B total_blocks][4B mlen][manifest][4B blen][block]...
+    # Magic-byte prefix per TBZ spec — required for sniff-stage
+    # recognition by tibet-continuityd and other intake-pipelines.
     buf = bytearray()
+    buf += b"\x54\x42\x5A\x01"   # "TBZ" + version=0x01
     total = len(blocks) + 1
     buf += struct.pack(">I", total)
 
@@ -120,10 +144,15 @@ def verify_bundle(
         return False, {}, [f"File not found: {bundle_path}"]
 
     raw = bundle_path.read_bytes()
-    if len(raw) < 8:
+    if len(raw) < 12:
         return False, {}, ["File too small to be a valid .tza"]
 
     pos = 0
+    # TBZ magic prefix (3B "TBZ" + 1B version, total 4B)
+    if raw[0:3] == b"\x54\x42\x5A":
+        pos += 4   # skip TBZ + version byte
+    # else: legacy bundle without magic prefix; continue at pos=0
+
     total = struct.unpack(">I", raw[pos:pos + 4])[0]
     pos += 4
 
@@ -206,10 +235,71 @@ def verify_bundle(
     return len(errors) == 0, manifest, errors
 
 
+def parse_filename_surface(name: str) -> dict | None:
+    """Parse a Semantic Surface Manifest from a filename.
+
+    Expected form (per spec §6.1):
+        <time-fragment>.<context>.<profile>.<priority>[.<icc-ext>]
+
+    Returns dict with surface_* fields if 4+ dot-separated segments
+    match the v1 character policy [a-z0-9-], else None.
+    """
+    import re
+    stem = name.rsplit(".tza", 1)[0] if name.endswith(".tza") else name
+    # strip any single .ICC-ext suffix (e.g. .claude / .gemini / .kit)
+    parts = stem.split(".")
+    if len(parts) < 4:
+        return None
+    pattern = re.compile(r"^[a-z0-9-]+$")
+    if not all(pattern.match(p) for p in parts[:4]):
+        return None
+    return {
+        "surface_time_fragment": parts[0],
+        "surface_context": parts[1],
+        "surface_profile": parts[2],
+        "surface_priority": parts[3],
+    }
+
+
+def compare_surfaces(
+    filename_surface: dict | None,
+    manifest_surface: dict | None,
+) -> str:
+    """Return one of: MATCH, MISMATCH, PARTIAL, NONE.
+
+    NONE   = neither side has surface_* fields (legacy bundle)
+    MATCH  = all four fields equal on both sides
+    PARTIAL = filename has fields but manifest absent (or vice versa)
+    MISMATCH = both present but at least one field differs
+    """
+    keys = (
+        "surface_time_fragment",
+        "surface_context",
+        "surface_profile",
+        "surface_priority",
+    )
+    fn_present = filename_surface is not None
+    mf_present = manifest_surface is not None and any(
+        manifest_surface.get(k) is not None for k in keys
+    )
+
+    if not fn_present and not mf_present:
+        return "NONE"
+    if fn_present != mf_present:
+        return "PARTIAL"
+
+    for k in keys:
+        if filename_surface.get(k) != manifest_surface.get(k):
+            return "MISMATCH"
+    return "MATCH"
+
+
 def inspect_bundle(bundle_path: Path) -> dict:
     """Read and return the manifest without full verification."""
     raw = bundle_path.read_bytes()
     pos = 0
+    if raw[0:3] == b"\x54\x42\x5A":
+        pos += 4   # skip TBZ magic + version byte
     _total = struct.unpack(">I", raw[pos:pos + 4])[0]
     pos += 4
     mlen = struct.unpack(">I", raw[pos:pos + 4])[0]
@@ -221,6 +311,8 @@ def unpack_bundle(bundle_path: Path, output_dir: Path) -> dict:
     """Extract blocks to output_dir. Returns manifest."""
     raw = bundle_path.read_bytes()
     pos = 0
+    if raw[0:3] == b"\x54\x42\x5A":
+        pos += 4   # skip TBZ magic + version byte
     total = struct.unpack(">I", raw[pos:pos + 4])[0]
     pos += 4
 

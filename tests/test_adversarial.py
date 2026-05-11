@@ -150,6 +150,10 @@ def test_bundle_swapped_block_order_detected(tmp_path: Path) -> None:
     bundle_path, manifest, _, _ = _bundle_fixture(tmp_path)
     raw = bundle_path.read_bytes()
     pos = 0
+    # Skip TBZ magic prefix (3B "TBZ" + 1B version)
+    if raw[0:3] == b"\x54\x42\x5A":
+        pos += 4
+    header_offset = pos
     _total = struct.unpack(">I", raw[pos:pos + 4])[0]
     pos += 4
     mlen = struct.unpack(">I", raw[pos:pos + 4])[0]
@@ -164,7 +168,10 @@ def test_bundle_swapped_block_order_detected(tmp_path: Path) -> None:
     pos += 4
     b2 = raw[pos:pos + b2_len]
 
-    swapped = raw[: 8 + mlen] + b2_hdr + b2 + b1_hdr + b1
+    # Reassemble: keep prefix+headers up to end-of-manifest,
+    # then swap block order
+    end_of_manifest = header_offset + 8 + mlen
+    swapped = raw[: end_of_manifest] + b2_hdr + b2 + b1_hdr + b1
     swapped_path = tmp_path / "swapped.tza"
     swapped_path.write_bytes(swapped)
     valid, checked_manifest, errors = verify_bundle(swapped_path)

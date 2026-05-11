@@ -16,7 +16,14 @@ import json
 import sys
 from pathlib import Path
 
-from .bundle import inspect_bundle, pack_bundle, unpack_bundle, verify_bundle
+from .bundle import (
+    compare_surfaces,
+    inspect_bundle,
+    pack_bundle,
+    parse_filename_surface,
+    unpack_bundle,
+    verify_bundle,
+)
 from .crypto import IdentityKey, sha256_hex
 from .handshake import (
     SendSeed,
@@ -90,6 +97,22 @@ def cmd_pack(args: argparse.Namespace) -> int:
     tpid = new_tpid() if not args.tpid else bytes.fromhex(args.tpid)
     output_path = Path(args.output)
 
+    # Resolve surface fields (per Semantic Surface Manifest spec §6).
+    surface_time = args.surface_time
+    if surface_time == "auto":
+        import time as _time
+        surface_time = _time.strftime("%Y-%m-%d", _time.gmtime())
+    surface_profile = args.surface_profile
+    if surface_profile is None and args.payload_type:
+        # Sensible default: derive profile from payload-type tag.
+        profile_map = {
+            "ai_state": "tza",
+            "identity_only": "iddrop",
+            "vc": "parentattest",
+            "capsule": "capsule",
+        }
+        surface_profile = profile_map.get(args.payload_type)
+
     manifest = pack_bundle(
         output_path=output_path,
         blocks=blocks,
@@ -99,19 +122,44 @@ def cmd_pack(args: argparse.Namespace) -> int:
         receiver_pubkey_hex=receiver_pub_hex,
         payload_type=args.payload_type,
         tpid=tpid,
+        surface_time_fragment=surface_time,
+        surface_context=args.surface_context,
+        surface_profile=surface_profile,
+        surface_priority=args.surface_priority,
     )
 
     print(f"✓ Packed {len(blocks)} block(s) → {output_path}")
     print(f"  tpid: {manifest['tpid']}")
     print(f"  payload_type: {manifest['payload_type']}")
+    if "surface_profile" in manifest:
+        surface_str = ".".join([
+            manifest.get("surface_time_fragment", "?"),
+            manifest.get("surface_context", "?"),
+            manifest.get("surface_profile", "?"),
+            manifest.get("surface_priority", "?"),
+        ])
+        print(f"  surface: {surface_str}")
     print(f"  total bytes: {output_path.stat().st_size}")
     return 0
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Verify a .tza bundle."""
+    """Verify a .tza bundle (with surface consistency check)."""
     bundle = Path(args.bundle)
     valid, manifest, errors = verify_bundle(bundle)
+
+    # Semantic Surface consistency check (RULE 6).
+    fn_surface = parse_filename_surface(bundle.name)
+    mf_surface = {
+        k: manifest.get(k) for k in (
+            "surface_time_fragment",
+            "surface_context",
+            "surface_profile",
+            "surface_priority",
+        )
+        if manifest.get(k) is not None
+    } or None
+    surface_status = compare_surfaces(fn_surface, mf_surface)
 
     print(f"Bundle: {bundle}")
     print(f"  tpid: {manifest.get('tpid', '?')}")
@@ -119,7 +167,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
     print(f"  receiver: {manifest.get('receiver_aint', '?')}")
     print(f"  payload_type: {manifest.get('payload_type', '?')}")
     print(f"  blocks: {len(manifest.get('blocks', []))}")
+
+    if surface_status == "NONE":
+        print("  semantic surface: ABSENT")
+    else:
+        print(f"  semantic surface: PRESENT")
+        print(f"  surface consistency: {surface_status}")
+        if surface_status == "MISMATCH":
+            print("  verifier disposition: TRIAGE  ⚠")
+            print("    (sealed bundle valid, but routing-layer anomaly —")
+            print("     causal isolation recommended per spec §11)")
+
     if valid:
+        if surface_status == "MISMATCH":
+            print("⚠ Bundle integrity OK but surface mismatch (triage)")
+            return 2
         print("✓ Bundle valid (manifest sig + per-block sigs verified)")
         return 0
     else:
@@ -130,10 +192,48 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    """Print the bundle manifest as pretty JSON."""
+    """Print bundle metadata; --json emits raw manifest."""
     bundle = Path(args.bundle)
     manifest = inspect_bundle(bundle)
-    print(json.dumps(manifest, indent=2, default=str))
+
+    if args.json_output:
+        print(json.dumps(manifest, indent=2, default=str))
+        return 0
+
+    # Pretty header form (per Semantic Surface tooling-sketch §1).
+    print(f"Bundle: {bundle.name}")
+    print(f"  Magic:           TBZ v1")
+    print(f"  Format:          tza-airdrop-{manifest.get('airdrop_format_version', '?')}")
+    print(f"  tpid:            {manifest.get('tpid', '?')}")
+    print(f"  sender:          {manifest.get('sender_aint', '?')}")
+    print(f"  receiver:        {manifest.get('receiver_aint', '?')}")
+    print(f"  payload_type:    {manifest.get('payload_type', '?')}")
+    print(f"  blocks:          {len(manifest.get('blocks', []))}")
+
+    surface_keys = (
+        "surface_time_fragment",
+        "surface_context",
+        "surface_profile",
+        "surface_priority",
+    )
+    has_surface = any(manifest.get(k) is not None for k in surface_keys)
+    if has_surface:
+        print(f"  Surface time:    {manifest.get('surface_time_fragment', '—')}")
+        print(f"  Surface context: {manifest.get('surface_context', '—')}")
+        print(f"  Surface profile: {manifest.get('surface_profile', '—')}")
+        print(f"  Surface priority: {manifest.get('surface_priority', '—')}")
+
+        fn_surface = parse_filename_surface(bundle.name)
+        mf_surface = {k: manifest.get(k) for k in surface_keys
+                       if manifest.get(k) is not None} or None
+        status = compare_surfaces(fn_surface, mf_surface)
+        marker = "✓" if status == "MATCH" else "⚠"
+        print(f"  Surface consistency: {status} {marker}")
+        if status == "MISMATCH":
+            print("    (filename and manifest surface_* differ;")
+            print("     triage fork recommended per spec §11)")
+    else:
+        print("  Semantic surface: ABSENT (legacy bundle)")
     return 0
 
 
@@ -239,6 +339,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--payload-type", default="ai_state",
                          choices=["ai_state", "identity_only", "vc", "capsule"])
     p_pack.add_argument("--tpid", help="Optional explicit tpid (hex)")
+    # Semantic Surface Manifest fields (optional, per spec §6).
+    p_pack.add_argument("--surface-context",
+                         help="Routing context label (e.g. redspecter-review)")
+    p_pack.add_argument("--surface-profile",
+                         help="Semantic profile (claude/gemini/kit/iddrop/parentattest/capsule/tza). "
+                              "Defaults derived from --payload-type.")
+    p_pack.add_argument("--surface-priority",
+                         choices=["urgent", "normal", "background",
+                                  "sealed", "heartbeat"],
+                         help=(
+                             "Dispatch priority. 'heartbeat' (= v0.6.3+) "
+                             "marks a liveness/shutdown signal: receivers "
+                             "that recognize the identity pin MAY route "
+                             "to a log-only lane (skip Fork/Seal/Police)."
+                         ))
+    p_pack.add_argument("--surface-time", default="auto",
+                         help='ISO8601 fragment or "auto" (today UTC). v1 uses YYYY-MM-DD.')
     p_pack.set_defaults(func=cmd_pack)
 
     p_verify = sub.add_parser("verify", help="Verify a .tza bundle")
@@ -247,6 +364,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inspect = sub.add_parser("inspect", help="Print manifest of a .tza bundle")
     p_inspect.add_argument("bundle", help="Path to .tza bundle")
+    p_inspect.add_argument("--json", dest="json_output", action="store_true",
+                            help="Emit raw manifest as JSON")
     p_inspect.set_defaults(func=cmd_inspect)
 
     p_unpack = sub.add_parser("unpack", help="Extract a .tza bundle")
