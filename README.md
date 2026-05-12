@@ -27,7 +27,24 @@ TIBET Drop in one breath:
 The end-to-end demo (`tibet-drop demo`) walks through all nine steps of
 the protocol and produces a clean validation pass for every primitive.
 
-## What's new in v0.2.0
+## What's new in v0.3.0
+
+- **`detect_format(raw)`** — magic-byte dispatcher. Distinguishes
+  `current` (`TBZ + 0x01 + BE-uint32 + CBOR`) from
+  `legacy-tbz-packer` (`TBZ + 0x85 + walked-JSON`). Both formats
+  can now be inspected; verify and unpack on legacy returns a
+  clear error pointing at the repack workflow.
+- **`canonical_filename(manifest)`** — reconstructs the canonical
+  SSM filename from a manifest's surface fields. Means a peer can
+  rename a bundle to anything human-readable
+  (`vergadering-dinsdag.pdf`) and ANY receiver can recover the
+  original SSM name from the manifest alone. Audit logs can record
+  both the canonical and the operator-applied name, making rename
+  events explicit instead of silent.
+- Fallbacks for missing surface fields so the helper never crashes;
+  operator gets a usable name even when the manifest is incomplete.
+
+## What's new in v0.2.x
 
 - `compare_surfaces()` and `parse_filename_surface()` exported from
   `tibet_drop.bundle` (= required by `tibet-continuityd` verify-stage
@@ -35,8 +52,6 @@ the protocol and produces a clean validation pass for every primitive.
 - `pack` CLI gains `--surface-priority heartbeat` as 5e priority value
   (alongside `urgent / normal / background / sealed`); receivers that
   recognize the identity pin MAY route to a log-only lane
-- TBZ bundle format unchanged — wire-compatible with v0.1.0 receivers
-  for non-heartbeat priorities
 - `tibet-continuityd` v0.6.4+ depends on `tibet-drop>=0.2.0`
 
 ## Use cases

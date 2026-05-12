@@ -131,6 +131,66 @@ def pack_bundle(
     return manifest
 
 
+def detect_format(raw: bytes) -> str:
+    """v0.3.0+ format detector for .tza bundles.
+
+    Returns one of:
+        "current"           — TBZ + 0x01 + BE-uint32 + CBOR manifest
+        "legacy-tbz-packer" — TBZ + 0x85 + walked-JSON-with-Dutch-keys
+        "unknown"           — no recognized signature
+
+    Both formats begin with the TBZ magic (b"TBZ"); they differ on
+    the version byte. The legacy form was emitted by an older
+    `tbz-packer` and is not currently re-emittable by tibet-drop;
+    receivers can still identify it and route to a repack lane.
+    """
+    if len(raw) < 4:
+        return "unknown"
+    if raw[0:3] != b"\x54\x42\x5A":
+        return "unknown"
+    version = raw[3]
+    if version == 0x01:
+        return "current"
+    if version == 0x85:
+        return "legacy-tbz-packer"
+    return "unknown"
+
+
+def _read_legacy_manifest(raw: bytes) -> dict:
+    """Best-effort manifest read for legacy 'tbz-packer' bundles.
+
+    Format observed (RS-2026-05-11 evidence):
+        TBZ                       3 bytes
+        0x85                      1 byte version
+        0x00 0x00 0x00            3 bytes reserved
+        JSON header block         variable, raw_decoder finds end
+        4-byte LE-uint32 length
+        JSON chain block          variable
+        ... possible payload blocks ...
+
+    We only read the first JSON object (= the header manifest) so
+    downstream code can identify origin / size / sender_aint / etc.
+    Returns a dict with the legacy fields plus `_legacy_format=True`.
+    """
+    import json as _json
+    decoder = _json.JSONDecoder()
+    try:
+        first_brace = raw.index(b"{", 4)
+    except ValueError:
+        return {"_legacy_format": True, "_error": "no JSON found"}
+    try:
+        text = raw[first_brace:].decode("utf-8", errors="replace")
+        obj, _end = decoder.raw_decode(text)
+    except _json.JSONDecodeError as e:
+        return {
+            "_legacy_format": True,
+            "_error": f"JSON decode failed: {e}",
+        }
+    obj["_legacy_format"] = True
+    obj["_origin_hint"] = "tbz-packer"
+    return obj
+
+
 def verify_bundle(
     bundle_path: Path,
     seen_tpids: set[str] | None = None,
@@ -138,6 +198,9 @@ def verify_bundle(
     """Verify a .tza bundle.
 
     Returns (valid, manifest_dict, errors_list).
+
+    v0.3.0+ dual-format: detects current vs legacy-tbz-packer format
+    and returns a clear error for legacy without crashing the parser.
     """
     errors = []
     if not bundle_path.exists():
@@ -146,6 +209,22 @@ def verify_bundle(
     raw = bundle_path.read_bytes()
     if len(raw) < 12:
         return False, {}, ["File too small to be a valid .tza"]
+
+    fmt = detect_format(raw)
+    if fmt == "legacy-tbz-packer":
+        manifest = _read_legacy_manifest(raw)
+        return (
+            False,
+            manifest,
+            [
+                "legacy 'tbz-packer' format detected — full crypto "
+                "verify not supported by tibet-drop >= 0.3.0. Repack "
+                "with `tibet-drop pack` to upgrade to the current "
+                "format (TBZ+0x01+CBOR).",
+            ],
+        )
+    if fmt == "unknown":
+        return False, {}, ["Unknown .tza format (no TBZ magic or unrecognized version)"]
 
     pos = 0
     # TBZ magic prefix (3B "TBZ" + 1B version, total 4B)
@@ -261,6 +340,43 @@ def parse_filename_surface(name: str) -> dict | None:
     }
 
 
+def canonical_filename(
+    manifest: dict, extension: str = ".tza"
+) -> str:
+    """Reconstruct the canonical filename from a manifest's SSM fields.
+
+    v0.3.0+ — addresses Richard's PARTIAL-as-defect observation and
+    Jasper's "rename-recovery" question (can the magic bytes tell us
+    the original name?). YES: as long as the manifest carries the
+    four surface_* fields, the canonical SSM filename is:
+
+        <surface_time_fragment>.<surface_context>.<surface_profile>.<surface_priority>.tza
+
+    Fallbacks:
+        - missing surface_time_fragment → today's UTC date
+        - missing surface_context       → "untitled"
+        - missing surface_profile       → "tibet"
+        - missing surface_priority      → "normal"
+
+    This means a human can rename the file to anything for navigation
+    (`vergadering-dinsdag.pdf`), and ANY peer with the manifest can
+    reconstruct the original SSM name from content alone. The audit
+    log can then record both the canonical name and the human-applied
+    name, making the rename explicit instead of silent.
+    """
+    import time as _time
+    return "{time}.{ctx}.{prof}.{prio}{ext}".format(
+        time=manifest.get(
+            "surface_time_fragment",
+            _time.strftime("%Y-%m-%d", _time.gmtime()),
+        ),
+        ctx=manifest.get("surface_context", "untitled"),
+        prof=manifest.get("surface_profile", "tibet"),
+        prio=manifest.get("surface_priority", "normal"),
+        ext=extension,
+    )
+
+
 def compare_surfaces(
     filename_surface: dict | None,
     manifest_surface: dict | None,
@@ -295,8 +411,18 @@ def compare_surfaces(
 
 
 def inspect_bundle(bundle_path: Path) -> dict:
-    """Read and return the manifest without full verification."""
+    """Read and return the manifest without full verification.
+
+    v0.3.0+ dual-format aware: legacy bundles return a dict with
+    `_legacy_format=True` and best-effort header fields instead of
+    crashing with a CBOR decode error.
+    """
     raw = bundle_path.read_bytes()
+    fmt = detect_format(raw)
+    if fmt == "legacy-tbz-packer":
+        return _read_legacy_manifest(raw)
+    if fmt == "unknown":
+        return {"_error": "unknown .tza format"}
     pos = 0
     if raw[0:3] == b"\x54\x42\x5A":
         pos += 4   # skip TBZ magic + version byte
@@ -308,8 +434,23 @@ def inspect_bundle(bundle_path: Path) -> dict:
 
 
 def unpack_bundle(bundle_path: Path, output_dir: Path) -> dict:
-    """Extract blocks to output_dir. Returns manifest."""
+    """Extract blocks to output_dir. Returns manifest.
+
+    v0.3.0+ dual-format aware: legacy bundles raise a clear
+    ValueError pointing operators at the repack workflow rather
+    than crashing partway through extraction.
+    """
     raw = bundle_path.read_bytes()
+    fmt = detect_format(raw)
+    if fmt == "legacy-tbz-packer":
+        raise ValueError(
+            "legacy 'tbz-packer' format detected — unpack not "
+            "supported by tibet-drop >= 0.3.0. Use the legacy "
+            "tbz-packer tool, or repack with `tibet-drop pack` "
+            "to upgrade."
+        )
+    if fmt == "unknown":
+        raise ValueError("unknown .tza format")
     pos = 0
     if raw[0:3] == b"\x54\x42\x5A":
         pos += 4   # skip TBZ magic + version byte
