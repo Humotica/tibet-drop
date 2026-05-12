@@ -131,19 +131,38 @@ def pack_bundle(
     return manifest
 
 
-def detect_format(raw: bytes) -> str:
+def detect_format(source) -> str:
     """v0.3.0+ format detector for .tza bundles.
+
+    Accepts bytes, str path, or pathlib.Path.
 
     Returns one of:
         "current"           — TBZ + 0x01 + BE-uint32 + CBOR manifest
         "legacy-tbz-packer" — TBZ + 0x85 + walked-JSON-with-Dutch-keys
         "unknown"           — no recognized signature
 
+    v0.3.1 (= peer-feedback Richard Barron 12 mei 2026):
+    accept Path/str in addition to bytes. Previous version returned
+    "unknown" silently if a str path was passed; now we read the
+    first 4 bytes of the file on the operator's behalf.
+
     Both formats begin with the TBZ magic (b"TBZ"); they differ on
     the version byte. The legacy form was emitted by an older
     `tbz-packer` and is not currently re-emittable by tibet-drop;
     receivers can still identify it and route to a repack lane.
     """
+    # v0.3.1: accept Path / str by reading first 4 bytes
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        if not p.exists() or not p.is_file():
+            return "unknown"
+        try:
+            raw = p.open("rb").read(4)
+        except OSError:
+            return "unknown"
+    else:
+        raw = source
+
     if len(raw) < 4:
         return "unknown"
     if raw[0:3] != b"\x54\x42\x5A":
