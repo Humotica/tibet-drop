@@ -12,8 +12,12 @@ Patterns after tibet-zip-cli; subcommands include:
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
+import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .bundle import (
@@ -393,7 +397,167 @@ def build_parser() -> argparse.ArgumentParser:
     p_demo.add_argument("-v", "--verbose", action="store_true")
     p_demo.set_defaults(func=cmd_demo)
 
+    p_send = sub.add_parser("send", help="Send a sealed bundle to an .aint inbox")
+    p_send.add_argument("bundle", help="Path to .tza bundle to send")
+    p_send.add_argument("--to", required=True, help="Recipient .aint")
+    p_send.add_argument("--base", help="Override hub base URL")
+    p_send.add_argument("--ainternet", action="store_true",
+                        help="Use api.ainternet.org")
+    p_send.add_argument("--brein", action="store_true",
+                        help="Use brein.jaspervandemeent.nl")
+    p_send.set_defaults(func=cmd_send)
+
+    p_recv = sub.add_parser("recv",
+                            help="Receive (arrival-gated) from your .aint inbox")
+    p_recv.add_argument("aint", help="Your .aint (inbox to receive from)")
+    p_recv.add_argument("--out", help="Directory to unpack the accepted bundle into")
+    p_recv.add_argument("--raw", action="store_true",
+                        help="Bypass the gate; raw ungated /pull")
+    p_recv.add_argument("--base", help="Override hub base URL")
+    p_recv.add_argument("--ainternet", action="store_true")
+    p_recv.add_argument("--brein", action="store_true")
+    p_recv.set_defaults(func=cmd_recv)
+
     return parser
+
+
+# ── Transport: send / recv over the iddrop inbox ────────────────────
+# The bundle is the security (TBZ self-authenticates), so transport is a
+# thin POST/GET over the brain-api iddrop inbox. send POSTs a sealed
+# bundle; recv runs the arrival-gate (sniff/verify/policy/trace) by
+# default, or --raw for an ungated pull.
+
+_HUBS = {
+    "local": "http://localhost:8000",
+    "ainternet": "https://api.ainternet.org",
+    "brein": "https://brein.jaspervandemeent.nl",
+}
+
+
+def _resolve_base(args: argparse.Namespace) -> str:
+    if getattr(args, "base", None):
+        return args.base.rstrip("/")
+    if getattr(args, "ainternet", False):
+        return _HUBS["ainternet"]
+    if getattr(args, "brein", False):
+        return _HUBS["brein"]
+    return _HUBS["local"]
+
+
+def _norm_aint(aint: str) -> str:
+    s = aint.strip().lower()
+    return s[:-5] if s.endswith(".aint") else s
+
+
+def _http(method: str, url: str, data: bytes | None = None,
+          ctype: str | None = None) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, data=data, method=method)
+    # Explicit User-Agent — api.ainternet.org's WAF rejects blank UAs.
+    req.add_header("User-Agent", "tibet-drop/transport")
+    if ctype:
+        req.add_header("Content-Type", ctype)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except urllib.error.URLError as e:
+        return 0, str(e).encode()
+
+
+def cmd_send(args: argparse.Namespace) -> int:
+    """POST a sealed bundle to a recipient .aint inbox."""
+    bundle = Path(args.bundle)
+    if not bundle.is_file():
+        print(f"✗ bundle not found: {bundle}", file=sys.stderr)
+        return 2
+    data = bundle.read_bytes()
+    base = _resolve_base(args)
+    aint = _norm_aint(args.to)
+    code, body = _http("POST", f"{base}/api/iddrop/inbox/{aint}",
+                       data=data, ctype="application/octet-stream")
+    try:
+        j = json.loads(body)
+    except Exception:
+        j = {"raw": body[:200].decode("utf-8", "replace")}
+    if code == 200 and j.get("status") == "accepted":
+        print(f"✓ sent {len(data)} bytes → {aint} @ {base}")
+        print(f"  envelope_id: {j.get('envelope_id')}")
+        return 0
+    print(f"✗ send failed (HTTP {code}): {j}", file=sys.stderr)
+    return 1
+
+
+def cmd_recv(args: argparse.Namespace) -> int:
+    """Receive from your .aint inbox — arrival-gated by default."""
+    base = _resolve_base(args)
+    aint = _norm_aint(args.aint)
+
+    if args.raw:
+        code, body = _http("GET", f"{base}/api/iddrop/inbox/{aint}/pull")
+        if code == 204:
+            print("· inbox empty")
+            return 0
+        if code != 200:
+            print(f"✗ pull failed (HTTP {code})", file=sys.stderr)
+            return 1
+        out = Path(args.out or f"{aint}-envelope.tza")
+        out.write_bytes(body)
+        print(f"✓ pulled {len(body)} bytes (raw, ungated) → {out}")
+        return 0
+
+    code, body = _http("GET", f"{base}/api/iddrop/inbox/{aint}/receive")
+    try:
+        j = json.loads(body)
+    except Exception:
+        print(f"✗ unexpected response (HTTP {code}): {body[:200]!r}",
+              file=sys.stderr)
+        return 1
+
+    verdict = j.get("verdict")
+    if verdict == "empty":
+        print("· inbox empty")
+        return 0
+    if verdict == "rejected":
+        print(f"✗ REJECTED by arrival-gate (HTTP {code}):")
+        for r in j.get("reasons", []):
+            print(f"  - {r}")
+        print(f"  quarantined: {j.get('quarantined')}  trace: {j.get('trace')}")
+        return 1
+    if verdict != "accepted":
+        print(f"? unknown verdict: {verdict}", file=sys.stderr)
+        return 1
+
+    print(f"✓ ACCEPTED from {j.get('sender_aint')} "
+          f"(trust {j.get('sender_trust')})")
+    print(f"  payload_type: {j.get('payload_type')}  "
+          f"materialize: {j.get('materialize')}")
+    print(f"  arrival_token: {j.get('arrival_token_id')}  "
+          f"← transfer_out: {j.get('transfer_out_token_id')}")
+
+    b64 = j.get("bundle_b64")
+    if not b64:
+        print("  (no bundle bytes returned)")
+        return 0
+    raw = base64.b64decode(b64)
+
+    if args.out:
+        outdir = Path(args.out)
+        with tempfile.NamedTemporaryFile(suffix=".tza", delete=False) as tf:
+            tf.write(raw)
+            tmp = Path(tf.name)
+        try:
+            manifest = unpack_bundle(tmp, outdir)
+            print(f"  unpacked {len(manifest.get('blocks', []))} "
+                  f"block(s) → {outdir}")
+        finally:
+            tmp.unlink(missing_ok=True)
+    else:
+        save = Path(f"{aint}-received.tza")
+        save.write_bytes(raw)
+        print(f"  saved sealed bundle → {save} "
+              f"(use `tibet-drop unpack` to extract)")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
