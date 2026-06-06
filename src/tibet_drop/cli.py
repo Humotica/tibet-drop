@@ -110,6 +110,7 @@ def cmd_pack(args: argparse.Namespace) -> int:
             "identity_only": "iddrop",
             "vc": "parentattest",
             "capsule": "capsule",
+            "file": "filedrop",
         }
         surface_profile = profile_map.get(args.payload_type)
 
@@ -337,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--input", required=True, help="File or directory to pack")
     p_pack.add_argument("--output", required=True, help="Output .tza path")
     p_pack.add_argument("--payload-type", default="ai_state",
-                         choices=["ai_state", "identity_only", "vc", "capsule"])
+                         choices=["ai_state", "identity_only", "vc", "capsule", "file"])
     p_pack.add_argument("--tpid", help="Optional explicit tpid (hex)")
     # Semantic Surface Manifest fields (optional, per spec §6).
     p_pack.add_argument("--surface-context",
@@ -377,7 +378,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_hs.add_argument("--identity", required=True, help="Sender identity dir")
     p_hs.add_argument("--output", required=True, help="Output seed file")
     p_hs.add_argument("--payload-type", default="ai_state",
-                       choices=["ai_state", "identity_only", "vc", "capsule"])
+                       choices=["ai_state", "identity_only", "vc", "capsule", "file"])
     p_hs.add_argument("--size-hint", type=int, default=0,
                        help="Estimated bundle size in bytes")
     p_hs.add_argument("--wipe", action="store_true",
