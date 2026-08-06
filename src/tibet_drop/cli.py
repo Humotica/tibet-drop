@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 import tempfile
 import urllib.error
@@ -456,8 +457,11 @@ def _http(method: str, url: str, data: bytes | None = None,
     req.add_header("User-Agent", "tibet-drop/transport")
     if ctype:
         req.add_header("Content-Type", ctype)
+    # Timeout env-tunable: big sealed carriers (tens of MB) need more than the
+    # default 15s to finish the upload write. TIBET_DROP_TIMEOUT overrides (seconds).
+    _timeout = float(os.environ.get("TIBET_DROP_TIMEOUT", "15"))
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=_timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()

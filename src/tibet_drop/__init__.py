@@ -4,4 +4,4 @@ Reference Python implementation of TIBET TAT (Touch-And-Transfer)
 wire protocol per Phase 0 spec, May 2026.
 """
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
