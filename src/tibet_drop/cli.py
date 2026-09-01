@@ -526,7 +526,16 @@ def cmd_recv(args: argparse.Namespace) -> int:
         print(f"✗ REJECTED by arrival-gate (HTTP {code}):")
         for r in j.get("reasons", []):
             print(f"  - {r}")
-        print(f"  quarantined: {j.get('quarantined')}  trace: {j.get('trace')}")
+        # RETENTION, not posture. This says whether the bytes were kept for forensics — it has
+        # never said anything about the sender being HELD pending review, and the old field name
+        # (`quarantined`) invited exactly that reading. Fall back to it so an older gate still
+        # renders.
+        retained = j.get("retained_for_forensics", j.get("quarantined"))
+        print(f"  retained for forensics: {retained}  trace: {j.get('trace')}")
+        if j.get("retention_error"):
+            # The gate FAILED to keep the evidence and said so. Never swallow this: a refusal that
+            # could not be retained is a refusal nobody can investigate later.
+            print(f"  ! retention FAILED — the envelope was not kept: {j['retention_error']}")
         return 1
     if verdict != "accepted":
         print(f"? unknown verdict: {verdict}", file=sys.stderr)
